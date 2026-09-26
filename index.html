@@ -1960,7 +1960,7 @@ class PlanetSurface {
     for (const k of ['colorData', 'dataTex', 'cloudData', 'gridH', 'gridWater', 'temp', 'moist', 'lakeM', 'saltM', 'biome']) if (this[k]) { out[k] = this[k]; out.transfer.push(this[k].buffer); }
     return out;
   }
-  importData(d) { for (const k of Object.keys(d)) if (k !== 'transfer') this[k] = d[k]; this.built = true; }
+  importData(d) { for (const k of Object.keys(d)) if (k !== 'transfer') this[k] = d[k]; this.built = true; this.viaWorker = true; }
   quantile(hmap, W, H, q) {
     if (q <= 0) return this.hmin - 1e-3;
     if (q >= 1) return this.hmax + 1e-3;
@@ -2233,8 +2233,10 @@ class PlanetSurface {
     return f;
   }
   locInfo(lat, lon) {
-    const c = this.climateLL(lat, lon), cl = Math.cos(lat * DEG);
+    const cl = Math.cos(lat * DEG);
     const x = cl * Math.sin(lon * DEG), y = Math.sin(lat * DEG), z = cl * Math.cos(lon * DEG);
+    if (this.gas) { this.gasColor(x, y, z, 6, SH); return { h: 0, T: this.P.temp, m: 0.5, water: false, biome: SH.biome, hN: 0, elev: 0, lake: false }; }
+    const c = this.climateLL(lat, lon);
     const h = this.height(x, y, z, this.oct || 7);
     this.shade(h, c.T, c.m, c.lake, c.salt, x, y, z, 48, SH);
     const hN = (h - this.sea) / this.landSpan;
@@ -2242,6 +2244,7 @@ class PlanetSurface {
   }
   /** Tile-independent vegetation estimate from the climate grid (used for glyph placement). */
   vegAt(lat, lon) {
+    if (this.gas) return { water: false, biome: B.BAND, veg: 0 };
     const c = this.climateLL(lat, lon);
     const CW = this.CW, CH = this.CH;
     const gx = ((lon + 180) / 360) * CW - 0.5, gy = U.clamp(((90 - lat) / 180) * CH - 0.5, 0, CH - 1.001);
@@ -2717,6 +2720,7 @@ const Life = {
     let tex = Math.floor(n(25) * 5.99);
     if (fam === 'arthropoid') tex = 3; else if (fam === 'medusoid' || fam === 'amorph' || fam === 'microbe') tex = 4; else if (fam === 'lithoform') tex = 5;
     else if (fam === 'ichthyoid' || fam === 'serpentid') tex = tex % 2; else if (fam === 'sessile' || fam === 'aerostat') tex = 0; else if (fam === 'cephaloid') tex = tex === 2 ? 0 : tex % 2;
+    else tex = tex % 3;
     if (P.biochem === 'silicon' && fam !== 'microbe' && tex !== 4) tex = 5;
     ph.texture = tex;
     ph.segments = 3 + Math.floor(n(26) * 4.99); ph.tentacles = 4 + Math.floor(n(27) * 6.99);
@@ -4093,23 +4097,40 @@ class GalaxyView extends View {
     }
     const stars = this.visibleStars(W, H);
     this.onScreen = stars;
-    const tw = App.realT;
+    const tw = App.realT, cx0 = App.vp.cx, cy0 = App.vp.cy;
     ctx.globalCompositeOperation = 'lighter';
     const zs = Math.pow(z, 0.55);
+    // tiny stars are batched into per-class, per-brightness paths (one fill each)
+    const buckets = this._buckets || (this._buckets = new Map());
+    for (const b of buckets.values()) b.n = 0;
+    const marked = [];
     for (const st of stars) {
-      const s = st.star, sx = (st.x - this.cam.x) * z + App.vp.cx, sy = (st.y - this.cam.y) * z + App.vp.cy;
+      const s = st.star, sx = (st.x - this.cam.x) * z + cx0, sy = (st.y - this.cam.y) * z + cy0;
       if (sx < -30 || sy < -30 || sx > W + 30 || sy > H + 30) continue;
+      if (z > 1.2 || st === this.sel || st === this.hover || Store.visited(st.code) || Store.isBookmarked(st.code)) marked.push(st);
+      if (s.cls === 'BH') { if (z <= 2) { ctx.fillStyle = 'rgba(255,160,90,0.8)'; ctx.fillRect(sx - 1, sy - 1, 2, 2); } continue; }
       const twk = 0.85 + 0.15 * Math.sin(tw * (1.3 + (st.seed & 7) * 0.3) + st.tw);
       const rad = s.vis * zs * 0.9 * twk;
-      if (s.cls === 'BH') { if (z > 2) continue; ctx.fillStyle = 'rgba(255,160,90,0.8)'; ctx.fillRect(sx - 1, sy - 1, 2, 2); continue; }
-      if (rad < 1.1) { ctx.fillStyle = C.css(s.color, Math.min(1, rad * 0.9)); ctx.fillRect(sx - 0.7, sy - 0.7, 1.4, 1.4); continue; }
+      if (rad < 1.1) {
+        const key = s.cls + (rad < 0.55 ? 0 : rad < 0.8 ? 1 : 2);
+        let b = buckets.get(key);
+        if (!b) { b = { xy: [], n: 0, css: C.css(STAR_TYPES[s.cls] && s.cls !== 'BH' ? s.color : [255, 255, 255], [0.35, 0.6, 0.9][+key.slice(-1)]) }; buckets.set(key, b); }
+        b.xy[b.n++] = sx; b.xy[b.n++] = sy;
+        continue;
+      }
       const R = rad * 3.2;
-      ctx.drawImage(Sprites.glow(s.color), sx - R, sy - R, R * 2, R * 2);
+      ctx.drawImage(s._glow || (s._glow = Sprites.glow(s.color)), sx - R, sy - R, R * 2, R * 2);
+    }
+    for (const b of buckets.values()) {
+      if (!b.n) continue;
+      ctx.fillStyle = b.css; ctx.beginPath();
+      for (let i = 0; i < b.n; i += 2) ctx.rect(b.xy[i] - 0.7, b.xy[i + 1] - 0.7, 1.4, 1.4);
+      ctx.fill();
     }
     ctx.globalCompositeOperation = 'source-over';
-    for (const st of stars) {
+    for (const st of marked) {
       const s = st.star;
-      const [sx, sy] = this.w2s(st.x, st.y);
+      const sx = (st.x - this.cam.x) * z + cx0, sy = (st.y - this.cam.y) * z + cy0;
       if (sx < -60 || sy < -60 || sx > W + 60 || sy > H + 60) continue;
       if (s.cls === 'BH' && z > 2) StarRender.blackHole(ctx, s, sx, sy, Math.min(10, 1.2 + z * 0.14), App.t);
       if (s.cls === 'NS' && z > 3) StarRender.pulsarBeams(ctx, s, sx, sy, 0.6 + z * 0.02, App.t);
@@ -4230,7 +4251,8 @@ class SystemView extends View {
     this.a0 = Math.max(0.012, (sys.planets[0] ? sys.planets[0].a : sys.frost) * 0.45);
     const s = sys.star;
     this.starR = U.clamp(10 * (1 + Math.log10(Math.max(s.radius, 0.01)) * 0.28), 4, 26);
-    if (sys.planets[0]) this.starR = Math.min(this.starR, this.D(sys.planets[0].a) * 0.45);
+    if (s.cls === 'RG' || s.cls === 'BSG') this.starR *= 1.7;
+    if (sys.planets[0]) this.starR = Math.min(this.starR, this.D(sys.planets[0].a) * (s.cls === 'RG' || s.cls === 'BSG' ? 0.7 : 0.45));
     this.bodies = [];
     for (const P of sys.planets) {
       const pts = new Float32Array(130 * 2);
@@ -5169,7 +5191,11 @@ const Store = {
     }
     this.save();
   },
-  isBookmarked(code) { return this.data.bookmarks.some((b) => b.code === code); },
+  isBookmarked(code) {
+    const b = this.data.bookmarks;
+    if (!this._bm || this._bmSrc !== b || this._bmLen !== b.length) { this._bm = new Set(b.map((x) => x.code)); this._bmSrc = b; this._bmLen = b.length; }
+    return this._bm.has(code);
+  },
   toggleBookmark(b) {
     const i = this.data.bookmarks.findIndex((x) => x.code === b.code);
     if (i >= 0) { this.data.bookmarks.splice(i, 1); UI.toast('Removed from discoveries'); }
@@ -5730,7 +5756,7 @@ const UI = {
         <span>Equator–pole ΔT</span><span>${F.n(P.dT, 1)} K</span><span>Lapse rate</span><span>${F.n(P.lapse, 1)} K / relief</span>
         <span>Rivers</span><span>${S.ready ? S.rivers.length + ' (priority-flood + D8 accumulation)' : '…'}</span>
         <span>Texture</span><span>${S.W}×${S.H} · climate grid ${S.W >> 1}×${S.H >> 1}</span>
-        <span>Build time</span><span>${S.ready ? F.i(S.buildMs) + ' ms (time-sliced)' : 'in progress'}</span>
+        <span>Build time</span><span>${S.ready ? F.i(S.buildMs) + (S.viaWorker ? ' ms (background worker)' : ' ms (time-sliced)') : 'in progress'}</span>
         <span>Heightfield checksum</span><span id="cksum">${S.ready ? U.hex(S.checksum) : '…'}</span>
       </div>
       <div class="btns"><button class="btn grow" data-act="verify">${UI.icons.enter} Verify determinism</button></div>`;
@@ -5768,7 +5794,7 @@ const UI = {
     const fw = el.querySelector('#foodweb');
     if (fw) Charts.foodWeb(fw, eco, (sp) => UI.speciesModal(sp, P, code));
     const sp = UI.panel.spec;
-    const baseLive = sp.live;
+    const baseLive = sp.baseLive || (sp.baseLive = sp.live);
     sp.live = () => { const o = baseLive ? baseLive() : {}; for (const s of eco.species) o['pop' + s.idx] = F.big(Life.pop(s, App.t)); return o; };
   },
 
@@ -6177,7 +6203,7 @@ const Input = {
   },
   down(e) {
     if (App.transitioning()) return;
-    this.el.setPointerCapture(e.pointerId);
+    try { this.el.setPointerCapture(e.pointerId); } catch (err) { /* capture is best-effort */ }
     App.touch = e.pointerType !== 'mouse';
     const now = performance.now();
     this.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -6429,7 +6455,6 @@ const App = {
       else this.navigate(Codes.galaxy(Galaxy.name, s.gx, s.gy), { select: s.code, from: null });
     }
   },
-  onSurfaceReady(P) { /* hook for views that wait on a survey */ },
   loop(ts) {
     const dt = Math.min(0.1, Math.max(0, (ts - this.lastTs) / 1000));
     this.lastTs = ts;
