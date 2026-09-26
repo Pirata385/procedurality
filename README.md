@@ -2,7 +2,11 @@
 
 An open-universe observatory that runs entirely in the browser. You don't pilot a ship or play a character. You drift through an infinite, seeded universe and watch it: stars, planets, moons, climates, rivers, alien ecosystems. The universe keeps running whether you're watching or not.
 
-**Play:** open `index.html` in any modern browser. No server, build step, install or network access is needed. The whole game is one self-contained file, and it also works from `file://`.
+**Play online:** https://pirata385.github.io/procedurality/
+
+**Play locally:** open `index.html` in any modern browser. No server, build step, install or network access is needed. The whole game is one self-contained file, and it also works from `file://`.
+
+Every push to `main` redeploys the site through `.github/workflows/pages.yml`.
 
 ## What's in it
 
